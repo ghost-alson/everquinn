@@ -524,6 +524,8 @@ html.bg *,html.bg *::before,html.bg *::after{animation-play-state:paused!importa
 .tour-card h2{margin:0 0 .3rem;font-size:1.15rem}
 .tour-card p{margin:0}
 .tour-foot{display:flex;justify-content:space-between;align-items:center;gap:.75rem;margin-top:.7rem;font-size:.78rem;color:var(--muted)}
+.cvbar{height:.45rem;border-radius:99px;background:var(--line);overflow:hidden;margin-top:.5rem}
+.cvbar i{display:block;height:100%;background:var(--marker)}
 </style>
 </head>
 <body>
@@ -556,7 +558,7 @@ function migrate(src) {
   for (let n = from + 1; n <= SCHEMA; n++) if (MIGRATIONS[n]) MIGRATIONS[n](d);
   const list = k => Array.isArray(d[k]) ? d[k].filter(x => x && typeof x === 'object') : [];
   d.books = list('books'); d.sessions = list('sessions'); d.notes = list('notes'); d.quotes = list('quotes');
-  d.settings = Object.assign({ weeklyTarget: 3, goal: 12 }, d.settings && typeof d.settings === 'object' ? d.settings : {});
+  d.settings = Object.assign({ weeklyTarget: 3, goal: 12, weather: { on: true, name: 'Heerstra\u00dfe, Berlin, Germany', lat: 52.51, lon: 13.24 } }, d.settings && typeof d.settings === 'object' ? d.settings : {});
   const top = Math.max(0, ...[...d.books, ...d.sessions, ...d.notes, ...d.quotes].map(x => Number(x.id) || 0));
   d.nextId = Math.max(Number(d.nextId) || 1, top + 1);
   d.v = Math.max(from, SCHEMA);
@@ -997,6 +999,7 @@ function coverAvg(u) {
   return new Promise((res, rej) => {
     const img = new Image(); img.onerror = rej;
     img.onload = () => { const c = document.createElement('canvas'); c.width = c.height = 1; const x = c.getContext('2d'); x.drawImage(img, 0, 0, 1, 1); const d = x.getImageData(0, 0, 1, 1).data; res('#' + [d[0], d[1], d[2]].map(v => v.toString(16).padStart(2, '0')).join('')); };
+    if (/^https?:/.test(u)) img.crossOrigin = 'anonymous';
     img.src = u;
   });
 }
@@ -1079,6 +1082,153 @@ function lamp() {
   return `${on ? '<span class="glow"></span>' : ''}<button class="lamp" id="lamp" aria-label="Turn lamp ${on ? 'off' : 'on'}"><span class="ball ${on ? 'on' : ''}"></span><span class="stem"></span></button>`;
 }
 const BOOKCOVERS = ['#2f7f86', '#8c2f39', '#3f5b9a', '#3f7a52', '#8a4f8f', '#4a7a9a'];
+// ---- Live weather: on by default for Berlin (Heerstra\u00dfe); change the city or turn it off in Settings ----
+// Only the chosen city's coordinates are sent, to open-meteo.com. Without it the window uses its own simulated weather (WX below).
+const WXKEY = 'booktracker:wx';
+let liveWx = null, wxBusy = false; // liveWx = { wx, t }: the last real weather we know about
+const wmoToWx = c => (c >= 95 || (c >= 80 && c <= 82) || (c >= 51 && c <= 67)) ? 'rain' : ((c >= 71 && c <= 77) || c === 85 || c === 86) ? 'snow' : (c === 45 || c === 48) ? 'fog' : c === 3 ? 'cloudy' : 'clear';
+const weatherSet = () => { const w = data.settings.weather; return w && w.on && Number.isFinite(w.lat) && Number.isFinite(w.lon) ? w : null; };
+function readWxCache() {
+  try {
+    const c = JSON.parse(localStorage.getItem(WXKEY) || 'null'), w = weatherSet();
+    if (c && w && c.lat === w.lat && c.lon === w.lon && ['clear', 'cloudy', 'rain', 'snow', 'fog'].includes(c.wx) && Number.isFinite(c.t)) return c;
+  } catch (e) {}
+  return null;
+}
+async function loadLiveWx() {
+  const w = weatherSet();
+  if (!w) { liveWx = null; return; }
+  const c = readWxCache();
+  if (c) liveWx = { wx: c.wx, t: c.t };
+  if ((c && Date.now() - c.t < 30 * 60000) || wxBusy) return;
+  wxBusy = true;
+  try {
+    const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), 8000);
+    const r = await fetch('https://api.open-meteo.com/v1/forecast?current=weather_code&timezone=auto&latitude=' + w.lat + '&longitude=' + w.lon, { signal: ctl.signal, cache: 'no-store', referrerPolicy: 'no-referrer' });
+    clearTimeout(to);
+    if (!r.ok) throw new Error('http');
+    const j = await r.json(), code = j && j.current && j.current.weather_code;
+    if (!Number.isFinite(code) || weatherSet() !== w) throw new Error('unusable');
+    liveWx = { wx: wmoToWx(code), t: Date.now() };
+    try { localStorage.setItem(WXKEY, JSON.stringify({ lat: w.lat, lon: w.lon, wx: liveWx.wx, t: liveWx.t })); } catch (e) {}
+  } catch (e) { /* keep the last known weather until the service answers again; the day and night cycle always follows the clock */ }
+  wxBusy = false;
+  if (weatherSet()) drawWx();
+  refreshIfStale();
+}
+function wxCardHtml() {
+  const w = weatherSet();
+  if (w) return `<h2 style="margin-top:0">Live weather</h2><p class="by">Your window follows the real weather in <b>${esc(w.name)}</b>${liveWx ? ' (' + liveWx.wx + ' right now)' : ''}. If the weather can\u2019t be reached, it keeps the last known weather.</p><div style="margin-top:.6rem"><button class="ghost" id="wx-off">Turn off or change city</button></div>`;
+  return `<h2 style="margin-top:0">Live weather</h2><p class="by">Show the real weather in your window. Pick a city: only its coordinates are sent to open-meteo.com, nothing else leaves your device.</p><div class="finder2"><label class="search big">${SRCH}<input id="wx-q" type="search" placeholder="City or postcode"></label><button class="cta" id="wx-go">Search</button></div><div class="wel-col" id="wx-res"></div>`;
+}
+function drawWx() { const el = document.getElementById('wxcard'); if (el) { el.innerHTML = wxCardHtml(); wireWx(); } }
+function wireWx() {
+  const gb = document.getElementById('wx-go'), q = document.getElementById('wx-q'), off = document.getElementById('wx-off');
+  if (gb) gb.onclick = wxSearch;
+  if (q) q.onkeydown = e => { if (e.key === 'Enter') wxSearch(); };
+  if (off) off.onclick = () => { data.settings.weather = null; liveWx = null; try { localStorage.removeItem(WXKEY); } catch (e) {} save(); drawWx(); refreshIfStale(); say('Live weather is off.'); };
+}
+async function wxSearch() {
+  const q = document.getElementById('wx-q'), out = document.getElementById('wx-res');
+  if (!q || !out) return;
+  const term = q.value.trim();
+  if (term.length < 2) { out.innerHTML = '<p class="by">Type at least two letters.</p>'; return; }
+  out.innerHTML = '<p class="by">Searching\u2026</p>';
+  try {
+    const r = await fetch('https://geocoding-api.open-meteo.com/v1/search?count=6&language=en&format=json&name=' + encodeURIComponent(term), { referrerPolicy: 'no-referrer' });
+    if (!r.ok) throw new Error('http');
+    const j = await r.json(), list = (j.results || []).filter(x => Number.isFinite(x.latitude) && Number.isFinite(x.longitude));
+    if (!list.length) { out.innerHTML = '<p class="by">No place found. Try another spelling or a postcode.</p>'; return; }
+    out.innerHTML = list.map((x, i) => `<button class="ghostwide" data-wi="${i}">${esc([x.name, x.admin1, x.country].filter(Boolean).join(', '))}</button>`).join('');
+    out.querySelectorAll('[data-wi]').forEach(b => b.onclick = () => {
+      const x = list[Number(b.dataset.wi)];
+      data.settings.weather = { on: true, name: [x.name, x.country].filter(Boolean).join(', '), lat: x.latitude, lon: x.longitude };
+      try { localStorage.removeItem(WXKEY); } catch (e) {}
+      liveWx = null; save(); drawWx(); loadLiveWx(); say('Live weather is on.');
+    });
+  } catch (e) { out.innerHTML = '<p class="by">Couldn\u2019t reach the weather service. Check your connection and try again.</p>'; }
+}
+
+// ---- Find covers for imported books (Open Library) ----
+// Started from Settings. Only titles, authors and ISBNs are sent. Looks up the ISBN first, then the title and author.
+let coverRun = null, coverSummary = '';
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const coverTodo = () => data.books.filter(b => b.imported && !b.cover);
+const isbnOf = b => { const s = String(b.isbn || '').replace(/[^0-9Xx]/g, ''); return s.length === 10 || s.length === 13 ? s : ''; };
+const normT = s => String(s || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/\(.*?\)|\[.*?\]/g, ' ').split(/[:;]|\s[-\u2013\u2014]\s/)[0].replace(/[^a-z0-9]+/g, ' ').trim();
+async function olSearch(params) {
+  const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), 8000);
+  try {
+    const r = await fetch('https://openlibrary.org/search.json?fields=title,author_name,cover_i&limit=5&' + params, { signal: ctl.signal, referrerPolicy: 'no-referrer' });
+    if (r.status === 429 || r.status === 503) { const e = new Error('slow'); e.slow = true; throw e; }
+    if (!r.ok) throw new Error('http ' + r.status);
+    return (await r.json()).docs || [];
+  } finally { clearTimeout(to); }
+}
+async function findCover(b) {
+  const isbn = isbnOf(b);
+  if (isbn) {
+    const docs = await olSearch('isbn=' + isbn);
+    if (docs.length) return (docs.find(x => x.cover_i) || {}).cover_i || 0;
+    await sleep(800);
+  }
+  const want = normT(b.title), first = String(b.authors || '').split(/,|;|&| and /)[0].trim();
+  if (want.length < 3) return 0;
+  const docs = await olSearch('title=' + encodeURIComponent(b.title) + (first ? '&author=' + encodeURIComponent(first) : ''));
+  const toks = normT(first).split(' ').filter(w => w.length >= 3);
+  const d = docs.find(x => {
+    if (!x.cover_i) return false;
+    const t = normT(x.title), a = normT((x.author_name || []).join(' '));
+    const same = t === want || (Math.min(t.length, want.length) >= 4 && (t.startsWith(want) || want.startsWith(t)));
+    return same && (!toks.length || toks.some(w => a.includes(w)));
+  });
+  return d ? d.cover_i : 0;
+}
+async function runCovers() {
+  if (coverRun) return;
+  const list = coverTodo();
+  if (!list.length) return;
+  const r = coverRun = { done: 0, total: list.length, found: 0, miss: 0, stop: false };
+  let errs = 0, why = '';
+  coverSummary = '';
+  drawCovers();
+  for (const b of list) {
+    if (r.stop) break;
+    try {
+      const id = await findCover(b);
+      errs = 0;
+      if (id && !b.cover) {
+        b.cover = 'https://covers.openlibrary.org/b/id/' + id + '-M.jpg';
+        try { b.col = await coverAvg(b.cover); } catch (e) { /* the average colour is a bonus; some servers do not allow reading it */ }
+        save(); r.found++;
+      } else r.miss++;
+    } catch (e) {
+      if (e && e.slow) { why = 'slow'; break; }
+      if (++errs >= 3) { why = 'offline'; break; }
+    }
+    r.done++; drawCovers();
+    await sleep(800);
+  }
+  coverRun = null;
+  coverSummary = (r.found ? 'Found ' + r.found + (r.found === 1 ? ' cover.' : ' covers.') : 'No new covers found.')
+    + (r.miss ? ' ' + r.miss + (r.miss === 1 ? ' book' : ' books') + ' had no confident match.' : '')
+    + (why === 'slow' ? ' Open Library asked us to slow down, so try again in a few minutes.' : why === 'offline' ? ' Open Library could not be reached. Try again later.' : r.stop ? ' Stopped.' : '');
+  drawCovers();
+}
+function coverCardHtml() {
+  const r = coverRun, todo = coverTodo().length;
+  let body;
+  if (r) body = `<p class="by">Searching\u2026 ${r.done} of ${r.total}. Found ${r.found} so far.</p><div class="cvbar"><i style="width:${Math.round(r.done / r.total * 100)}%"></i></div><div style="margin-top:.6rem"><button class="ghost" id="cv-stop">Stop</button></div>`;
+  else body = (coverSummary ? `<p class="by">${esc(coverSummary)}</p>` : '') + (todo ? `<p class="by">${todo} imported ${todo === 1 ? 'book has' : 'books have'} no cover yet.</p><div style="margin-top:.6rem"><button class="ghost" id="cv-go">Find covers</button></div>` : '<p class="by">No imported books are waiting for a cover.</p>');
+  return `<h2 style="margin-top:0">Book covers</h2><p class="by">Looks up covers for your imported books on Open Library. Only titles, authors and ISBNs are sent, never your notes or reading.</p>${body}`;
+}
+function drawCovers() { const el = document.getElementById('cvcard'); if (el) { el.innerHTML = coverCardHtml(); wireCovers(); } }
+function wireCovers() {
+  const g = document.getElementById('cv-go'), s = document.getElementById('cv-stop');
+  if (g) g.onclick = runCovers;
+  if (s) s.onclick = () => { if (coverRun) coverRun.stop = true; s.disabled = true; };
+}
+
 const WX = {
   winter: [['clear', .2], ['seasonal', .5], ['cloudy', .2], ['snow', .1]],
   spring: [['clear', .35], ['seasonal', .35], ['cloudy', .15], ['rain', .15]],
@@ -1098,6 +1248,7 @@ function skyNow() {
   const r = (((s * 2654435761) >>> 0) % 1000) / 1000;
   let acc = 0, wx = 'clear';
   for (const [t, w] of WX[season]) { acc += w; if (r < acc) { wx = t; break; } }
+  if (liveWx) wx = liveWx.wx === 'clear' ? (wx === 'seasonal' ? 'seasonal' : 'clear') : liveWx.wx;
   const o = winPrev, ph = o.phase || phase;
   return { season: o.season || season, phase: ph, pos: o.phase ? (ph === 'night' ? 0.45 : ph === 'dusk' ? 0.92 : 0) : pos, wx: o.wx || wx };
 }
@@ -1189,16 +1340,10 @@ app.addEventListener('click', e => {
   save(); announce(before); render();
 });
 let quoteOpen = false;
-// PHOTO FRAME QUOTES: the built-in lines. Add or edit them here; each one is { text, author } (author is optional).
+// PHOTO FRAME QUOTES: the built-in default. Add or edit lines here; each one is { text, author } (author is optional).
 // One quote shows per day and changes at midnight. Quotes saved in the Journal can join them (see Settings).
 const FRAME_QUOTES = [
-  { text: 'A page a day keeps the noise away.' },
-  { text: 'Every book is a small door left open.' },
-  { text: 'Read a little. Rest a little. Begin again tomorrow.' },
-  { text: 'Some chapters are for learning, some are just for staying.' },
-  { text: 'The best bookmark is a quiet afternoon.' },
-  { text: 'Slow reading is still reading.' },
-  { text: 'Somewhere on this shelf is the line you needed today.' }
+  { text: 'Once a princess, always a princess.' }
 ];
 function todaysQuote() {
   const pool = FRAME_QUOTES.map(q => ({ text: q.text, by: q.author })).concat(data.quotes.map(q => ({ text: q.text, by: q.author })));
@@ -1745,6 +1890,8 @@ function renderSettings() {
       <label class="goal">Books to finish this year<input id="goal" type="number" min="1" value="${data.settings.goal}"></label></section>
     <section class="card"><h2 style="margin-top:0">Your name</h2><p class="by">Shown at the top of Home.</p><label class="goal"><input id="nm" value="${esc(data.settings.name || '')}" maxlength="24" placeholder="Your name"></label></section>
     <section class="card"><h2 style="margin-top:0">Photo frame</h2><p class="by">One quote shows each day and changes at midnight.</p><label class="check"><input type="checkbox" id="uj" ${data.settings.useJournalQuotes ? 'checked' : ''}> Also show quotes from my Journal</label></section>
+    <section class="card" id="wxcard">${wxCardHtml()}</section>
+    <section class="card" id="cvcard">${coverCardHtml()}</section>
     <section class="card"><h2 style="margin-top:0">Welcome tour</h2><p class="by">A quick look at what each tab does.</p><div style="margin-top:.6rem"><button class="ghost" id="tour-go">Replay the tour</button></div></section>
     <section class="card"><h2 style="margin-top:0">Import books</h2><p class="by">Bring in a library export (CSV) from StoryGraph or Goodreads. Books already in your library are skipped.</p>
       <div style="margin-top:.6rem"><button class="ghost" id="im-pick">Choose CSV file</button></div>
@@ -1757,12 +1904,14 @@ function renderSettings() {
       <input type="file" id="bk-file" accept=".json,application/json" hidden>
       ${pb ? `<div class="note"><p>Backup from ${esc((pendingBackup.savedAt || '').slice(0, 10))}: ${pb.books.length} books, ${pb.sessions.length} sessions, ${(pb.notes || []).length} notes. Loading it replaces what is on this device.</p><button class="primary" id="bk-apply">Replace my data</button> <button class="link" id="bk-cancel">Cancel</button></div>` : ''}</section>
     <button class="link danger" id="clr">Erase all data</button>
-    <p class="ver">Version 1.66</p>`;
+    <p class="ver">Version 0.64alpha4</p>`;
   app.querySelectorAll('[data-t]').forEach(el => el.onclick = () => { data.settings.weeklyTarget = Number(el.dataset.t); save(); render(); });
   document.getElementById('goal').onchange = e => { const v = Number(e.target.value); if (v >= 1) { data.settings.goal = v; save(); } };
   document.getElementById('nm').oninput = e => { data.settings.name = e.target.value.trim(); save(); };
   document.getElementById('uj').onchange = e => { data.settings.useJournalQuotes = e.target.checked; save(); };
   document.getElementById('tour-go').onclick = startTour;
+  wireWx();
+  wireCovers();
   document.getElementById('im-pick').onclick = () => document.getElementById('im-file').click();
   document.getElementById('im-file').onchange = e => { const f = e.target.files[0]; if (f) loadImportFile(f); };
   const ig = document.getElementById('im-go'); if (ig) ig.onclick = applyImport;
@@ -1794,10 +1943,10 @@ function refreshIfStale() {
   lastStamp = s;
   if (['home', 'calendar', 'awards'].includes(view)) { const y = window.scrollY; render(); window.scrollTo(0, y); }
 }
-document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshIfStale(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { refreshIfStale(); loadLiveWx(); } });
 window.addEventListener('pageshow', e => { if (e.persisted) refreshIfStale(); });
 window.addEventListener('focus', refreshIfStale);
-setInterval(() => { if (!document.hidden) refreshIfStale(); }, 60000);
+setInterval(() => { if (!document.hidden) { refreshIfStale(); loadLiveWx(); } }, 60000);
 
 // Pause looping animations while the app is hidden or in the background (see html.bg in the style block)
 const setBg = () => document.documentElement.classList.toggle('bg', document.hidden);
@@ -1828,7 +1977,7 @@ function finishWelcome() {
 function drawWelcome() {
   const el = document.getElementById('welcome'), s = wz.step, $ = id => document.getElementById(id);
   const body = [
-    `<h2>Welcome to Everquinn</h2><p class="by">A quiet place to keep track of what you read. Everything stays on this device: no accounts, no tracking.</p><label class="goal">What should I call you?<input id="wz-name" maxlength="24" placeholder="Your name" autocomplete="given-name" value="${esc(wz.name)}"></label>`,
+    `<h2>Welcome to Everquinn</h2><p class="by">A quiet place to keep track of what you read. Your books stay on this device: no accounts, no tracking. The window shows live weather for Berlin, and you can change that in Settings.</p><label class="goal">What should I call you?<input id="wz-name" maxlength="24" placeholder="Your name" autocomplete="given-name" value="${esc(wz.name)}"></label>`,
     `<h2>How often would you like to read?</h2><p class="by">Pick the days per week you are aiming for. Reach them and your streak grows.</p><div class="chips" style="margin-top:1rem">${[3, 5, 7].map(x => `<button data-wt="${x}" class="${x === wz.target ? 'on' : ''}">${x} days</button>`).join('')}</div><p class="by">You can change this any time in Settings.</p>`,
     `<h2>A goal for the year</h2><p class="by">How many books would you like to finish this year?</p><label class="goal">Books<input id="wz-goal" type="number" min="1" inputmode="numeric" value="${esc(wz.goal)}"></label>`,
     `<h2>Bring your history along?</h2><p class="by">If you already track your books somewhere else, you can import them now. You can also do it later in Settings.</p><div class="wel-col"><button class="ghostwide" id="wz-csv">Import a CSV (StoryGraph or Goodreads)</button><button class="ghostwide" id="wz-bk">Load an Everquinn backup</button></div><input type="file" id="wz-csvf" accept=".csv,text/csv" hidden><input type="file" id="wz-bkf" accept=".json,application/json" hidden>`
@@ -1880,6 +2029,7 @@ document.getElementById('tour').addEventListener('click', e => {
 });
 window.addEventListener('resize', placeTour);
 
+loadLiveWx();
 render();
 if (needsWelcome()) showWelcome();
 </script>
